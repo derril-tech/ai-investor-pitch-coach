@@ -1,0 +1,302 @@
+# Created automatically by Cursor AI (2024-08-24)
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  test-backend:
+    name: Test Backend (NestJS)
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: apps/gateway/package-lock.json
+    
+    - name: Install dependencies
+      run: |
+        cd apps/gateway
+        npm ci
+    
+    - name: Run linter
+      run: |
+        cd apps/gateway
+        npm run lint
+    
+    - name: Run tests
+      run: |
+        cd apps/gateway
+        npm run test:cov
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        REDIS_URL: redis://localhost:6379
+        JWT_SECRET: test-secret
+        NODE_ENV: test
+
+  test-orchestrator:
+    name: Test Orchestrator (FastAPI)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('apps/orchestrator/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        cd apps/orchestrator
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run linter
+      run: |
+        cd apps/orchestrator
+        flake8 src/ tests/ --max-line-length=88 --extend-ignore=E203,W503
+    
+    - name: Run tests
+      run: |
+        cd apps/orchestrator
+        pytest tests/ --cov=src --cov-report=xml --cov-report=term-missing
+
+  test-workers:
+    name: Test Workers (Celery)
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('apps/workers/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        cd apps/workers
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run tests
+      run: |
+        cd apps/workers
+        pytest tests/ --cov=src --cov-report=xml --cov-report=term-missing
+      env:
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        CELERY_RESULT_BACKEND: redis://localhost:6379/0
+
+  test-frontend:
+    name: Test Frontend (Next.js)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: apps/frontend/package-lock.json
+    
+    - name: Install dependencies
+      run: |
+        cd apps/frontend
+        npm ci
+    
+    - name: Run linter
+      run: |
+        cd apps/frontend
+        npm run lint
+    
+    - name: Run type check
+      run: |
+        cd apps/frontend
+        npm run type-check
+    
+    - name: Run tests
+      run: |
+        cd apps/frontend
+        npm run test:ci
+
+  test-sdk:
+    name: Test SDK
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: packages/sdk/package-lock.json
+    
+    - name: Install dependencies
+      run: |
+        cd packages/sdk
+        npm ci
+    
+    - name: Run linter
+      run: |
+        cd packages/sdk
+        npm run lint
+    
+    - name: Run type check
+      run: |
+        cd packages/sdk
+        npm run type-check
+    
+    - name: Run tests
+      run: |
+        cd packages/sdk
+        npm run test
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-orchestrator, test-workers, test-frontend, test-sdk]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build and push Docker images
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: false
+        tags: |
+          pitch-coach:latest
+          pitch-coach:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/develop'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to staging environment
+      run: |
+        echo "Deploying to staging environment..."
+        # TODO: Add actual deployment steps for staging
+        # - Deploy to Vercel (frontend)
+        # - Deploy to Render/Fly (backend services)
+        # - Run database migrations
+        # - Update environment variables
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to production environment
+      run: |
+        echo "Deploying to production environment..."
+        # TODO: Add actual deployment steps for production
+        # - Deploy to Vercel (frontend)
+        # - Deploy to Render/Fly (backend services)
+        # - Run database migrations
+        # - Update environment variables
+        # - Run smoke tests
